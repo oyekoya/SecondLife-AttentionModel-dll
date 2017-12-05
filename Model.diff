@@ -1,0 +1,913 @@
+Index: newview/llhudeffectlookat.h
+===================================================================
+--- newview/llhudeffectlookat.h	(revision 7)
++++ newview/llhudeffectlookat.h	(revision 25)
+@@ -70,6 +70,7 @@
+ 	const LLVector3& getTargetPos() { return mTargetPos; }
+ 	const LLVector3d& getTargetOffset() { return mTargetOffsetGlobal; }
+ 	bool calcTargetPosition();
++	bool calcTargetPosWithAttentionModel();
+ 
+ protected:
+ 	LLHUDEffectLookAt(const U8 type);
+Index: newview/llagent.h
+===================================================================
+--- newview/llagent.h	(revision 7)
++++ newview/llagent.h	(revision 25)
+@@ -337,6 +337,7 @@
+ 	//--------------------------------------------------------------------
+ public:
+ 	void			startTyping();
++	void            startTypingDefaultText();
+ 	void			stopTyping();
+ public:
+ 	// When the agent hasn't typed anything for this duration, it leaves the 
+Index: newview/llviewerobjectlist.h
+===================================================================
+--- newview/llviewerobjectlist.h	(revision 7)
++++ newview/llviewerobjectlist.h	(revision 25)
+@@ -44,6 +44,7 @@
+ 
+ // project includes
+ #include "llviewerobject.h"
++#include "model.h"
+ 
+ class LLCamera;
+ class LLNetMap;
+@@ -72,6 +73,8 @@
+ 	inline LLViewerObject *getObject(const S32 index);
+ 	
+ 	inline LLViewerObject *findObject(const LLUUID &id);
++	inline LLViewerObject *findObjectFromStringID(const std::string id);
++	
+ 	LLViewerObject *createObjectViewer(const LLPCode pcode, LLViewerRegion *regionp); // Create a viewer-side object
+ 	LLViewerObject *createObject(const LLPCode pcode, LLViewerRegion *regionp,
+ 								 const LLUUID &uuid, const U32 local_id, const LLHost &sender);
+@@ -178,13 +181,15 @@
+ 	S32 mNumDeadObjectUpdates;
+ 	S32 mNumUnknownKills;
+ 	S32 mNumDeadObjects;
++	std::set<LLPointer<LLViewerObject> > mActiveObjects;
++
+ protected:
+ 	LLDynamicArray<U64>	mOrphanParents;	// LocalID/ip,port of orphaned objects
+ 	LLDynamicArray<OrphanInfo> mOrphanChildren;	// UUID's of orphaned objects
+ 	S32 mNumOrphans;
+ 
+ 	LLDynamicArrayPtr<LLPointer<LLViewerObject>, 256> mObjects;
+-	std::set<LLPointer<LLViewerObject> > mActiveObjects;
++	//std::set<LLPointer<LLViewerObject> > mActiveObjects;
+ 
+ 	LLDynamicArrayPtr<LLPointer<LLViewerObject> > mMapObjects;
+ 
+@@ -250,6 +255,26 @@
+ 	}
+ }
+ 
++inline LLViewerObject *LLViewerObjectList::findObjectFromStringID(const std::string id)
++{
++	std::map<LLUUID, LLPointer<LLViewerObject> >::iterator iter;
++	
++	std::string strId;
++	for(iter = mUUIDObjectMap.begin(); iter != mUUIDObjectMap.end(); ++iter)
++	{
++		strId= (iter->first).asString();
++		//std::string str= id.substr(0,30);
++		size_t found;
++		found=strId.find(id);
++		if(found !=std::string::npos)
++		{
++			return iter->second;
++		}
++	}
++	return NULL;
++	
++}
++
+ inline LLViewerObject *LLViewerObjectList::getObject(const S32 index)
+ {
+ 	LLViewerObject *objectp;
+@@ -270,6 +295,15 @@
+ inline void LLViewerObjectList::removeFromMap(LLViewerObject *objectp)
+ {
+ 	mMapObjects.removeObj(objectp);
++
++	//-----------attentionmodel------------
++	std::string str=objectp->getID().asString();
++	char *objectId = new char[str.size()];
++	std::copy(str.begin(), str.end(), objectId);
++
++	removeNode( objectId);
++	//------------------------------------------------
++
+ }
+ 
+ 
+Index: newview/llhudeffectlookat.cpp
+===================================================================
+--- newview/llhudeffectlookat.cpp	(revision 7)
++++ newview/llhudeffectlookat.cpp	(revision 25)
+@@ -44,8 +44,9 @@
+ #include "llrendersphere.h"
+ #include "llselectmgr.h"
+ #include "llglheaders.h"
++#include "llkeyboard.h"
++#include "model.h"
+ 
+-
+ #include "llxmltree.h"
+ 
+ 
+@@ -414,7 +415,52 @@
+ 	{
+ 		return FALSE;
+ 	}
+-
++	
++	//--------------attention model-----------------------
++	LLVOAvatar* source_avatar = (LLVOAvatar*)(LLViewerObject*)mSourceObject;
++	if(source_avatar->isSelf())
++	{
++		LLVector3 targetPos;
++		float tx=0, ty=0, tz=0, ax=0, ay=0, az=0, aw=0;
++		char id[128];
++		getHeadTarget(id,&tx,&ty,&tz,&ax,&ay,&az,&aw);
++		targetPos.setVec(tx,tz,ty);
++	
++		//LLVector3* targetPos = (LLVector3*)source_avatar->getAnimationData("LookAtPointHead");
++		if(!targetPos.isNull())
++		{
++			position= targetPos;
++		}
++	}
++	//------------------------------------------------------
++	/*--------------attention model-----------------------
++	LLVOAvatar* source_avatar = (LLVOAvatar*)(LLViewerObject*)mSourceObject;
++	if(source_avatar->isSelf())
++	{
++		//LLVector3 targetPos;
++		float tx=0, ty=0, tz=0, ax=0, ay=0, az=0, aw=0;
++		char id[128];
++		LLViewerObject* selectedObject; 
++	
++		getHeadTarget(id,&tx,&ty,&tz,&ax,&ay,&az,&aw);
++		//targetPos.setVec(tx,tz,ty);
++		selectedObject =gObjectList.findObjectFromStringID(id);
++				
++		//LLVector3* targetPos = (LLVector3*)source_avatar->getAnimationData("LookAtPointHead");
++		if(selectedObject)
++		{
++			//targetPos=selectedObject->getRenderPosition();
++			//position.setVec(targetPos[0],targetPos[1],targetPos[2]);//=selectedObject->getRenderPosition();
++			//position.rotVec(selectedObject->getRenderRotation());
++			position = gAgent.getPosAgentFromGlobal(selectedObject->getPositionGlobal());
++			position += selectedObject->getPositionAgent();
++			position = position * selectedObject->getRenderRotation();
++			//object =selectedObject;
++			//target_type=LOOKAT_TARGET_SELECT;
++		}
++	}
++	//------------------------------------------------------*/
++	
+ 	F32 current_time  = mTimer.getElapsedTimeF32();
+ 
+ 	// type of lookat behavior or target object has changed
+@@ -477,6 +523,10 @@
+ 	if (mSourceObject.notNull())
+ 	{
+ 		((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData("LookAtPoint");
++		((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData("LookAtPointHead");//-----animationmodel
++		//((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData("LookAtPointEyes");//-----animationmodel
++		//((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData("LookAtPointRightEyeRot");//-----animationmodel
++		//((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData("LookAtPointLeftEyeRot");//-----animationmodel
+ 	}
+ 
+ 	mSourceObject = NULL;
+@@ -564,14 +614,32 @@
+ 
+ 	if (mTargetType != LOOKAT_TARGET_NONE)
+ 	{
+-		if (calcTargetPosition())
++		LLVOAvatar* source_avatar = (LLVOAvatar*)(LLViewerObject*)mSourceObject;
++	
++		if(!source_avatar->isSelf())
+ 		{
+-			LLMotion* head_motion = ((LLVOAvatar*)(LLViewerObject*)mSourceObject)->findMotion(ANIM_AGENT_HEAD_ROT);
+-			if (!head_motion || head_motion->isStopped())
++			if (calcTargetPosition())
+ 			{
+-				((LLVOAvatar*)(LLViewerObject*)mSourceObject)->startMotion(ANIM_AGENT_HEAD_ROT);
++				LLMotion* head_motion = ((LLVOAvatar*)(LLViewerObject*)mSourceObject)->findMotion(ANIM_AGENT_HEAD_ROT);
++				if (!head_motion || head_motion->isStopped())
++				{
++					((LLVOAvatar*)(LLViewerObject*)mSourceObject)->startMotion(ANIM_AGENT_HEAD_ROT);
++				}
+ 			}
+ 		}
++		else
++		{
++			//---------attention model------------Set current attention only for Self avatar-----------------
++			if (calcTargetPosWithAttentionModel())
++			{
++				LLMotion* head_motion = ((LLVOAvatar*)(LLViewerObject*)mSourceObject)->findMotion(ANIM_AGENT_HEAD_ROT);
++				if (!head_motion || head_motion->isStopped())
++				{
++					((LLVOAvatar*)(LLViewerObject*)mSourceObject)->startMotion(ANIM_AGENT_HEAD_ROT);
++				}
++			}
++			//--------------------------------------------------
++		}
+ 	}
+ 
+ 	if (sDebugLookAt)
+@@ -580,6 +648,59 @@
+ 	}
+ }
+ 
++//This method inserts the current head and eyes position of our avatar
++//to the attention model. Hence the saliencies scores and the new attention 
++//can be calculated, given the current avatar's position
++bool LLHUDEffectLookAt::calcTargetPosWithAttentionModel()
++{
++	if (gNoRender)
++	{
++		return false;
++	}
++	
++	LLVOAvatar* source_avatar = (LLVOAvatar*)(LLViewerObject*)mSourceObject;
++	LLVector3 headPos = source_avatar->mHeadp->getWorldPosition();
++	
++	LLQuaternion headRot =source_avatar->mHeadp->getParent()->getWorldRotation();
++	
++	//--------------attention Model: set Head Position
++	if (!source_avatar->isBuilt())
++		return false;
++
++	
++	float tx=0, ty=0, tz=0, ax=0, ay=0, az=0, aw=0;
++	headRot.getAngleAxis(&aw,&ax,&ay,&az);
++	
++	if(gKeyboard->getCurScanKey() ==78)//'n'
++	{
++		std::cout<<"nomnom: "<<printOutput()<<std::endl;
++	}
++	
++	
++	source_avatar->removeAnimationData("LookAtPointOther");
++	
++	
++	//--------------attention Model: set Right Eye Position
++	LLVector3 rightEyePos = source_avatar->mEyeRightp->getWorldPosition();//Right or left eye???????
++	LLQuaternion rightEyeRot =source_avatar->mEyeRightp->getParent()->getWorldRotation();
++
++
++	tx = 0;
++	ty = 0;
++	tz = 0;
++	ax=0;
++	ay=0; 
++	az=0;
++	aw=0;
++	rightEyeRot.getAngleAxis(&aw,&ax,&ay,&az);
++
++	setAvatarCoords(1,rightEyePos[0],rightEyePos[2],rightEyePos[1],ax,az,ay,aw);
++
++	
++	return true;
++}
++
++
+ /**
+  * Initializes the mTargetPos member from the current mSourceObjec and mTargetObject
+  * (and possibly mTargetOffsetGlobal).
+@@ -675,7 +796,11 @@
+ 	if (!mTargetPos.isFinite())
+ 		return false;
+ 
+-	source_avatar->setAnimationData("LookAtPoint", (void *)&mTargetPos);
++	source_avatar->setAnimationData("LookAtPointOther", (void *)&mTargetPos);
++	
++	//-----------------------------------------------------------
++	//std::cout<<"HEAD POSITION:"<<mTargetPos[0]<<","<<mTargetPos[1]<<","<<mTargetPos[2]<<std::endl;
++	//-----------------------------------------------------------
+ 
+ 	return true;
+ }
+Index: newview/llvoavatar.cpp
+===================================================================
+--- newview/llvoavatar.cpp	(revision 7)
++++ newview/llvoavatar.cpp	(revision 25)
+@@ -6952,7 +6952,21 @@
+ 		return lhs->getPixelArea() > rhs->getPixelArea();
+ 	}
+ };
+-
++//attention Model use:------------------
++/*void LLVOAvatar::getSelfAvatar(LLVOAvatar* selfAvatar)
++{
++	for (std::vector<LLCharacter*>::iterator iter = LLCharacter::sInstances.begin();
++		 iter != LLCharacter::sInstances.end(); ++iter)
++	{
++		LLVOAvatar* inst = (LLVOAvatar*) *iter;
++		if (inst->isSelf())
++		{
++			selfAvatar = inst;
++			return;
++		}
++	}
++}*/
++//--------------------------------------
+ // static
+ void LLVOAvatar::cullAvatarsByPixelArea()
+ {
+Index: newview/llappviewer.cpp
+===================================================================
+--- newview/llappviewer.cpp	(revision 7)
++++ newview/llappviewer.cpp	(revision 25)
+@@ -3722,6 +3722,47 @@
+ 		gAgent.updateCamera();
+ 	}
+ 
++	//--------------attention model------------------Autopilot--------
++	static LLFrameTimer agentNavigation_timer;
++	static LLViewerObject* selectedObject; 
++	if( gKeyboard->getCurScanKey() == 57)//if you press "9"
++	{
++		if(agentNavigation_timer.getElapsedTimeF32() > 15.f )// repeat the autonavigation only after 15 secs.
++		{
++			if(!gAgent.getAutoPilot())//and if autopilot is not already enabled
++			{
++				char objectId[128];
++				float tx=0,ty=0,tz=0;
++				
++				getNavModelTarget(objectId, &tx, &ty,&tz);//Get a randon object from within the fov
++				selectedObject =gObjectList.findObjectFromStringID(objectId);// detect the object in the SL scene
++				
++				if(selectedObject)
++				{
++					gAgent.startAutoPilotGlobal(selectedObject->getPositionGlobal());//start navigation toward selected objet
++					
++					std::cout<<"id1:"<<objectId<<std::endl;	
++					agentNavigation_timer.reset();
++				}
++			}
++		}
++		else
++		{
++			if(!gAgent.getAutoPilot())
++			{
++				if(selectedObject)
++				{
++					if(selectedObject->isAvatar())//if selected object is an avatar
++					{
++						gAgent.startTypingDefaultText();// type a "Hello" message
++					}
++				}
++			}
++		}
++	}
++
++	//-------------------------------------------------------
++
+ 	// update media focus
+ 	LLViewerMediaFocus::getInstance()->update();
+ 
+@@ -3961,6 +4002,7 @@
+ 
+ 
+ 		// we want to clear the control after sending out all necessary agent updates
++		
+ 		gAgent.resetControlFlags();
+ 				
+ 		// Decode enqueued messages...
+Index: newview/llviewerobjectlist.cpp
+===================================================================
+--- newview/llviewerobjectlist.cpp	(revision 7)
++++ newview/llviewerobjectlist.cpp	(revision 25)
+@@ -241,6 +241,12 @@
+ 	if (objectp->isDead())
+ 	{
+ 		// The update failed
++		//-----------attentionmodel------Revome Dead items from attentionModel Databese------
++		char objectId[128];
++		objectp->getID().toString(objectId);
++		removeNode( objectId);
++		//------------------------------------------------
++
+ 		return;
+ 	}
+ 
+@@ -276,6 +282,106 @@
+ 		gViewerWindow->getWindow()->decBusyCount();
+ 		gViewerWindow->setCursor( UI_CURSOR_ARROW );
+ 	}
++
++	//------------attention model----------------
++	// In this part we feed the objects of the scene into the attentionmodel's database.
++
++	LLVOAvatar* avatarp = gAgent.getAvatarObject(); //Get the current agent as a scene object
++		
++	float distance =0;
++	float ax=0, ay=0, az=0, aw=0;
++		
++	if(avatarp)
++	{
++		LLVector3 avatarPosition= avatarp->mHeadp->getWorldPosition(); // Find avatar's head world position
++		LLQuaternion headRot =avatarp->mHeadp->getParent()->getWorldRotation();// Find avatar's head wolrd orientation
++		headRot.getAngleAxis(&aw,&ax,&ay,&az);
++	
++		setAvatarCoords(2,avatarPosition[0],avatarPosition[2],avatarPosition[1],ax,az,ay,aw);//send information about avatar's
++																							//head to the attention model
++		
++		LLVector3 position;	
++		if(objectp->isAvatar())//if the current object is an avatar, we keep the head position
++		{
++			LLVOAvatar* source_avatar = (LLVOAvatar*)(LLViewerObject*)objectp ;
++			position= source_avatar->mHeadp->getWorldPosition();
++	
++		}
++		else
++		{
++			position = objectp->getPosition();
++		}
++		
++		LLQuaternion rot = objectp->getRotation();
++	
++		 distance =dist_vec(position, avatarPosition);//Distance between our avatar's head and current object
++	
++		
++		ax=0, ay=0, az=0, aw=0;
++		rot.getAngleAxis(&aw,&ax,&ay,&az);
++		
++		if(distance<30)//if the object is close insert it in the attention model database
++		{
++			char objectId[128];
++			std::string str;
++			objectp->getID().toString(objectId);
++			objectp->getID().toString(str);
++			std::string str2("4c425828-61bd-426a-9638-e702f3955e12");
++			size_t found;
++			found=str.find(str2);
++			if(found ==std::string::npos)
++			{
++				
++				updateNode(objectId,position[0],position[2], position[1],ax,az,ay,aw);
++				//std::cout<<"OBJECT POSITION:"<<objectId<<std::endl;
++				//std::cout<<"distance: "<<distance<<std::endl;
++				if(objectp->isAvatar())// if the object is an avatar, add more body parts to enhance attention towards it
++				{
++					LLVOAvatar* avatarTarget = (LLVOAvatar*)(LLViewerObject*)objectp ;
++					
++					//Add Eyes
++					position= avatarTarget->mEyeLeftp->getWorldPosition();
++					rot = avatarTarget->mEyeLeftp->getParent()->getWorldRotation();
++					ax=0, ay=0, az=0, aw=0;
++					rot.getAngleAxis(&aw,&ax,&ay,&az);
++					updateNode(objectId,position[0],position[2], position[1],ax,az,ay,aw);
++
++					//Add chest
++					position= avatarTarget->mChestp->getWorldPosition();
++					rot = avatarTarget->mChestp->getParent()->getWorldRotation();
++					ax=0, ay=0, az=0, aw=0;
++					rot.getAngleAxis(&aw,&ax,&ay,&az);
++					updateNode(objectId,position[0],position[2], position[1],ax,az,ay,aw);
++
++					//Add Right Eye
++					position= avatarTarget->mEyeRightp->getWorldPosition();
++					rot = avatarTarget->mEyeRightp->getParent()->getWorldRotation();
++					ax=0, ay=0, az=0, aw=0;
++					rot.getAngleAxis(&aw,&ax,&ay,&az);
++					updateNode(objectId,position[0],position[2], position[1],ax,az,ay,aw);
++
++					//Torso
++					position= avatarTarget->mTorsop->getWorldPosition();
++					rot = avatarTarget->mTorsop->getParent()->getWorldRotation();
++					ax=0, ay=0, az=0, aw=0;
++					rot.getAngleAxis(&aw,&ax,&ay,&az);
++					updateNode(objectId,position[0],position[2], position[1],ax,az,ay,aw);
++
++				}
++			}
++		}
++		else//if the object is too far discard it from the attention model database
++		{
++			
++			char objectId[128];
++			objectp->getID().toString(objectId);
++			removeNode( objectId);
++		
++
++		}
++	}
++	
++	//------------------------------------------------
+ }
+ 
+ static LLFastTimer::DeclareTimer FTM_PROCESS_OBJECTS("Process Objects");
+@@ -345,6 +451,16 @@
+ 	U8 compressed_dpbuffer[2048];
+ 	LLDataPackerBinaryBuffer compressed_dp(compressed_dpbuffer, 2048);
+ 	LLDataPacker *cached_dpp = NULL;
++
++	////------------attention model----------------
++
++	//LLVector3 position;
++	//LLQuaternion rot;
++
++	//float ax=0, ay=0, az=0, aw=0;
++	//
++	//std::string str;
++	////----------------------------------------------	
+ 	
+ 	for (i = 0; i < num_objects; i++)
+ 	{
+@@ -476,6 +592,8 @@
+ 				objectp->setRegion(regionp);
+ 				objectp->updateRegion(regionp); // for LLVOAvatar
+ 			}
++
++
+ 		}
+ 
+ 		if (!objectp)
+@@ -550,8 +668,8 @@
+ 			}
+ 			processUpdateCore(objectp, user_data, i, update_type, NULL, justCreated);
+ 		}
++		
+ 	}
+-
+ 	LLVOAvatar::cullAvatarsByPixelArea();
+ }
+ 
+@@ -701,7 +819,7 @@
+ 	{
+ 		objectp = *active_iter;
+ 		if (objectp)
+-		{
++		{	
+ 			idle_list.push_back( objectp );
+ 		}
+ 		else
+@@ -894,6 +1012,13 @@
+ 
+ 	if (objectp)
+ 	{
++		//-----------attentionmodel------------
++		char objectId[128];
++		objectp->getID().toString(objectId);
++		
++		removeNode( objectId);
++		//------------------------------------------------
++
+ 		if (objectp->isDead())
+ 		{
+ 			// This object is already dead.  Don't need to do more.
+@@ -973,12 +1098,22 @@
+ 	S32 i = 0;
+ 	S32 num_removed = 0;
+ 	LLViewerObject *objectp;
++
+ 	while (i < mObjects.count())
+ 	{
+ 		// Scan for all of the dead objects and remove any "global" references to them.
+ 		objectp = mObjects[i];
+ 		if (objectp->isDead())
+-		{
++		{	
++			//-----------attentionmodel------------
++			char objectId[128];
++			objectp->getID().toString(objectId);
++			/*char *objectId = new char[str.size()];
++			std::copy(str.begin(), str.end(), objectId);*/
++
++			removeNode( objectId);
++			//------------------------------------------------
++
+ 			mObjects.remove(i);
+ 			num_removed++;
+ 
+@@ -1013,13 +1148,22 @@
+ 	if (active != objectp->onActiveList())
+ 	{
+ 		if (active)
+-		{
++		{	
+ 			//llinfos << "Adding " << objectp->mID << " " << objectp->getPCodeString() << " to active list." << llendl;
+ 			mActiveObjects.insert(objectp);
+ 			objectp->setOnActiveList(TRUE);
+ 		}
+ 		else
+ 		{
++			//-----------attentionmodel------------
++			char objectId[128];
++			objectp->getID().toString(objectId);
++			
++			//std::copy(str.begin(), str.end(), objectId);
++
++			removeNode( objectId);
++			//------------------------------------------------
++
+ 			//llinfos << "Removing " << objectp->mID << " " << objectp->getPCodeString() << " from active list." << llendl;
+ 			mActiveObjects.erase(objectp);
+ 			objectp->setOnActiveList(FALSE);
+@@ -1078,7 +1222,8 @@
+ 
+ 	for (S32 i = 0; i < mMapObjects.count(); i++)
+ 	{
+-		LLViewerObject* objectp = mMapObjects[i];
++		LLViewerObject* objectp = mMapObjects[i];		
++		
+ 		if (!objectp->getRegion() || objectp->isOrphaned() || objectp->isAttachment())
+ 		{
+ 			continue;
+Index: newview/llagent.cpp
+===================================================================
+--- newview/llagent.cpp	(revision 7)
++++ newview/llagent.cpp	(revision 25)
+@@ -440,7 +440,7 @@
+ LLAgent::~LLAgent()
+ {
+ 	cleanup();
+-
++	stop();
+ 	// *Note: this is where LLViewerCamera::getInstance() used to be deleted.
+ }
+ 
+@@ -2655,6 +2655,9 @@
+ 	if (!mLookAt)
+ 	{
+ 		mLookAt = (LLHUDEffectLookAt *)LLHUDManager::getInstance()->createViewerEffect(LLHUDObject::LL_HUD_EFFECT_LOOKAT);
++		start();
++		std::cout<<"initial size: "<<printOutput()<<std::endl;
++		
+ 	}
+ 	if (!mPointAt)
+ 	{
+@@ -2722,7 +2725,46 @@
+ 	LLNearbyChatBar::getInstance()->sendChatFromViewer("", CHAT_TYPE_START, FALSE);
+ }
+ 
++
+ //-----------------------------------------------------------------------------
++//---------------------animationModel-------------------------------
++
++
++void LLAgent::startTypingDefaultText()
++{
++		//sendAnimationRequest(ANIM_AGENT_EXPRESS_WINK, ANIM_REQUEST_START);
++		////sendAnimationRequest(ANIM_AGENT_EXPRESS_WINK, ANIM_REQUEST_STOP);
++		//
++
++	mTypingTimer.reset();
++
++	if (getRenderState() & AGENT_STATE_TYPING)
++	{
++		// already typing, don't trigger a different animation
++		return;
++	}
++	setRenderState(AGENT_STATE_TYPING);
++
++	if (mChatTimer.getElapsedTimeF32() < 2.f)
++	{
++		LLViewerObject* chatter = gObjectList.findObject(mLastChatterID);
++		if (chatter && chatter->isAvatar())
++		{
++			gAgent.setLookAt(LOOKAT_TARGET_RESPOND, chatter, LLVector3::zero);
++		}
++	}
++
++	if (gSavedSettings.getBOOL("PlayTypingAnim"))
++	{
++		sendAnimationRequest(ANIM_AGENT_TYPE, ANIM_REQUEST_START);
++	}
++	LLNearbyChatBar::getInstance()->sendChatFromViewer("Hello", CHAT_TYPE_NORMAL, TRUE);
++}
++
++//-----------------------------------------------------------------------------
++
++
++//-----------------------------------------------------------------------------
+ // stopTyping()
+ //-----------------------------------------------------------------------------
+ void LLAgent::stopTyping()
+Index: newview/llvoavatar.h
+===================================================================
+--- newview/llvoavatar.h	(revision 7)
++++ newview/llvoavatar.h	(revision 25)
+@@ -425,6 +425,8 @@
+ 	//--------------------------------------------------------------------
+ public:
+ 	static void	cullAvatarsByPixelArea();
++	//static void getSelfAvatar(LLVOAvatar* selfAvatar);
++
+ 	BOOL		isCulled() const { return mCulled; }
+ private:
+ 	BOOL		mCulled;
+Index: llcharacter/llheadrotmotion.cpp
+===================================================================
+--- llcharacter/llheadrotmotion.cpp	(revision 7)
++++ llcharacter/llheadrotmotion.cpp	(revision 25)
+@@ -41,7 +41,9 @@
+ #include "m3math.h"
+ #include "v3dmath.h"
+ #include "llcriticaldamp.h"
++#include "model.h"
+ 
++
+ //-----------------------------------------------------------------------------
+ // Constants
+ //-----------------------------------------------------------------------------
+@@ -191,12 +193,40 @@
+ 	F32 head_slerp_amt = LLCriticalDamp::getInterpolant(HEAD_LOOKAT_LAG_HALF_LIFE);
+ 	F32 torso_slerp_amt = LLCriticalDamp::getInterpolant(TORSO_LOOKAT_LAG_HALF_LIFE);
+ 
+-	LLVector3* targetPos = (LLVector3*)mCharacter->getAnimationData("LookAtPoint");
++	//-------------attention model-------------------
++	
++	
++	LLVector3* targetPosOfOtherAvatar = (LLVector3*)mCharacter->getAnimationData("LookAtPointOther");//---------
++	LLVector3 targetPos;
++	LLQuaternion head_rot;
++	float tx=0, ty=0, tz=0, ax=0, ay=0, az=0, aw=0;
++	char id[128];
++	getHeadModelTarget(id,&tx,&ty,&tz,&ax,&ay,&az,&aw);//Get new head position from the attention model
++	targetPos.setVec(tx,-tz,-ty);
++	head_rot.setAngleAxis(aw,ax,-az,-ay);
++	
++	/*std::cout<<"NumObjectsInMap: "<<printOutput()<<" , object Selected: "<<id<< std::endl;*/
+ 
+-	if (targetPos)
++	
++
++	if (!targetPos.isNull())
+ 	{
+-		LLVector3 headLookAt = *targetPos;
++		LLVector3 headLookAt;
++		if(targetPosOfOtherAvatar)// set new position olny if we deal with our self avatar.
++		{
++			headLookAt = *targetPosOfOtherAvatar;
++		}
++		else
++		{
++			headLookAt = targetPos;
++		}
++		
++		//----------------------------------------------
++		//std::cout<<"head position: "<<headLookAt<<std::endl;
++		//----------------------------------------------
++		
+ 
++
+ //		llinfos << "Look At: " << headLookAt + mHeadJoint->getWorldPosition() << llendl;
+ 
+ 		F32 lookatDistance = headLookAt.normVec();
+@@ -230,7 +260,9 @@
+ 			// and neither are zero length
+ 			LLVector3 up(headLookAt % left);
+ 
+-			targetHeadRotWorld = LLQuaternion(headLookAt, left, up);
++			
++			targetHeadRotWorld =LLQuaternion(headLookAt, left, up);//------------
++			
+ 		}
+ 	}
+ 	else
+@@ -239,7 +271,13 @@
+ 	}
+ 
+ 	LLQuaternion head_rot_local = targetHeadRotWorld * currentInvRootRotWorld;
++
++	//---------------------------------------------------------------------------------
+ 	head_rot_local.constrain(HEAD_ROTATION_CONSTRAINT);
++	if(!targetPosOfOtherAvatar)// set new rotation olny if we deal with our self avatar.
++	{
++		head_rot_local = head_rot;
++	}
+ 
+ 	// set final torso rotation
+ 	// Set torso target rotation such that it lags behind the head rotation
+@@ -436,15 +474,37 @@
+ 	}
+ 
+ 	BOOL has_eye_target = FALSE;
+-	LLVector3* targetPos = (LLVector3*)mCharacter->getAnimationData("LookAtPoint");
+ 
+-	if (targetPos)
++	//-----------------attntion model----------------------------------------
++	LLVector3* targetPosofOtherAvatar = (LLVector3*)mCharacter->getAnimationData("LookAtPointOther");
++
++	LLVector3 targetPos;
++	LLQuaternion targetLeftEye_rot;
++	
++	float tx=0, ty=0, tz=0, ax=0, ay=0, az=0, aw=0;
++	char id[128];
++	getEyeModelTarget(id,&tx,&ty,&tz,&ax,&ay,&az,&aw);// Get the new eye position from the attention model
++	targetPos.setVec(tx,-tz,-ty);
++	targetLeftEye_rot.setAngleAxis(aw,ax,-az,-ay);
++	
++	if (!targetPos.isNull())
+ 	{
+ 		LLVector3		skyward(0.f, 0.f, 1.f);
+ 		LLVector3		left;
+ 		LLVector3		up;
+ 
+-		eye_look_at = *targetPos;
++		if(targetPosofOtherAvatar)// set the new eye position only if we deal with our self avatar
++		{
++			eye_look_at =*targetPosofOtherAvatar;
++		}
++		else
++		{
++			eye_look_at = targetPos;
++		}
++		//----------------------------------------------
++		//std::cout << "eye position: " << eye_look_at << std::endl;
++		//----------------------------------------------
++		
+ 		has_eye_target = TRUE;
+ 		F32 lookAtDistance = eye_look_at.normVec();
+ 
+@@ -502,6 +562,7 @@
+ 		vergence_quat.loadIdentity();
+ 	}
+ 
++
+ 	// calculate eye rotations
+ 	LLQuaternion left_eye_rot = target_eye_rot;
+ 	left_eye_rot = vergence_quat * eye_jitter_rot * left_eye_rot;
+@@ -510,8 +571,24 @@
+ 	vergence_quat.transQuat();
+ 	right_eye_rot = vergence_quat * eye_jitter_rot * right_eye_rot;
+ 
+-	mLeftEyeState->setRotation( left_eye_rot );
+-	mRightEyeState->setRotation( right_eye_rot );
++	std::string strNull("NULL");
++			
++	if(targetPosofOtherAvatar)
++	{
++		mLeftEyeState->setRotation( left_eye_rot );
++		mRightEyeState->setRotation( right_eye_rot );
++	}
++	else if(strNull.compare(id)==0)
++	{
++		mLeftEyeState->setRotation( LLQuaternion::DEFAULT );
++		mRightEyeState->setRotation(LLQuaternion::DEFAULT);
++	}
++	else
++	{
++		mLeftEyeState->setRotation( targetLeftEye_rot );
++		mRightEyeState->setRotation( targetLeftEye_rot );
++	}
++	//----------------------------------------------------------------------
+ 
+ 	return TRUE;
+ }
+Index: llcharacter/lltargetingmotion.cpp
+===================================================================
+--- llcharacter/lltargetingmotion.cpp	(revision 7)
++++ llcharacter/lltargetingmotion.cpp	(revision 25)
+@@ -115,7 +115,12 @@
+ 	F32 slerp_amt = LLCriticalDamp::getInterpolant(TORSO_TARGET_HALF_LIFE);
+ 
+ 	LLVector3 target;
+-	LLVector3* lookAtPoint = (LLVector3*)mCharacter->getAnimationData("LookAtPoint");
++	//LLVector3* lookAtPoint = (LLVector3*)mCharacter->getAnimationData("LookAtPoint");
++	
++	//------------------attention model---------------------------------------
++	LLVector3* lookAtPoint = (LLVector3*)mCharacter->getAnimationData("LookAtPointHead");
++	//LLVector3* lookAtPoint = (LLVector3*)mCharacter->getAnimationData("LookAtPointEyes");
++	//------------------------------------------------------------------------
+ 
+ 	BOOL result = TRUE;
+ 
+Index: llwindow/llkeyboard.h
+===================================================================
+--- llwindow/llkeyboard.h	(revision 7)
++++ llwindow/llkeyboard.h	(revision 25)
+@@ -77,6 +77,7 @@
+ 	} ENumpadDistinct;
+ 
+ public:
++	
+ 	LLKeyboard();
+ 	virtual ~LLKeyboard();
+ 
+@@ -92,8 +93,8 @@
+ 	U16				inverseTranslateKey(const KEY translated_key);
+ 	BOOL			handleTranslatedKeyUp(KEY translated_key, U32 translated_mask);		// Translated into "Linden" keycodes
+ 	BOOL			handleTranslatedKeyDown(KEY translated_key, U32 translated_mask);	// Translated into "Linden" keycodes
++	KEY				getCurScanKey(){return mCurScanKey;}
+ 
+-
+ 	virtual BOOL	handleKeyUp(const U16 key, MASK mask) = 0;
+ 	virtual BOOL	handleKeyDown(const U16 key, MASK mask) = 0;
+ 
+@@ -139,6 +140,7 @@
+ 	KEY				mCurTranslatedKey;
+ 	KEY				mCurScanKey;		// Used during the scanKeyboard()
+ 
++	
+ 	static LLKeyStringTranslatorFunc*	mStringTranslator;	// Used for l10n + PC/Mac/Linux accelerator labeling
+ 	
+ 	e_numpad_distinct mNumpadDistinct;
